@@ -131,7 +131,10 @@ function verifyJwt(
       exp?: number;
     };
     if (!decoded.userId || !decoded.email || !decoded.role) return null;
-    if (typeof decoded.exp === "number" && decoded.exp < Math.floor(Date.now() / 1000)) {
+    if (
+      typeof decoded.exp === "number" &&
+      decoded.exp < Math.floor(Date.now() / 1000)
+    ) {
       return null;
     }
     return {
@@ -142,6 +145,12 @@ function verifyJwt(
   } catch {
     return null;
   }
+}
+
+function extractBearerToken(req: Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
+  return authHeader.slice(7).trim() || null;
 }
 
 function getDashboardPath(role: UserRole): string {
@@ -293,7 +302,11 @@ app.post("/api/auth/sign-in", async (req: Request, res: Response) => {
       "+password"
     )) as IAuthUser | null;
 
-    if (!user || !user.password || !verifyPassword(String(password), user.password)) {
+    if (
+      !user ||
+      !user.password ||
+      !verifyPassword(String(password), user.password)
+    ) {
       res.status(401).json({
         success: false,
         message: "Invalid email or password",
@@ -330,12 +343,7 @@ app.post("/api/auth/sign-in", async (req: Request, res: Response) => {
 
 app.get("/api/auth/me", async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token =
-      authHeader && authHeader.startsWith("Bearer ")
-        ? authHeader.slice(7).trim()
-        : null;
-
+    const token = extractBearerToken(req);
     if (!token) {
       res.status(401).json({ success: false, message: "Unauthorized" });
       return;
@@ -367,7 +375,139 @@ app.get("/api/auth/me", async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error("Session check error:", error);
-    res.status(500).json({ success: false, message: "Failed to verify session" });
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to verify session" });
+  }
+});
+
+app.get("/api/auth/user/:id", async (req: Request, res: Response) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      res.status(400).json({ success: false, message: "Invalid user ID" });
+      return;
+    }
+
+    const user = (await AuthUser.findById(id)) as IAuthUser | null;
+    if (!user) {
+      res.status(404).json({ success: false, message: "User not found" });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      user: {
+        id: String(user._id),
+        name: user.name,
+        image: user.image ?? null,
+        role: user.role,
+        businessName: user.businessName ?? "",
+      },
+    });
+  } catch (error) {
+    console.error("Get user by ID error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch user" });
+  }
+});
+
+app.put("/api/auth/update-profile", async (req: Request, res: Response) => {
+  try {
+    const token = extractBearerToken(req);
+    if (!token) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const decoded = verifyJwt(token);
+    if (!decoded) {
+      res
+        .status(401)
+        .json({ success: false, message: "Invalid or expired token" });
+      return;
+    }
+
+    const requester = (await AuthUser.findById(
+      decoded.userId
+    )) as IAuthUser | null;
+    if (!requester) {
+      res.status(401).json({ success: false, message: "User not found" });
+      return;
+    }
+
+    if (requester.isBlocked) {
+      res.status(403).json({ success: false, message: "Account is blocked" });
+      return;
+    }
+
+    const { userId, name, businessName, image, password } = req.body as {
+      userId?: string;
+      name?: string;
+      businessName?: string;
+      image?: string | null;
+      password?: string;
+    };
+
+    const targetId = userId ? String(userId) : String(requester._id);
+    if (!mongoose.Types.ObjectId.isValid(targetId)) {
+      res.status(400).json({ success: false, message: "Invalid user ID" });
+      return;
+    }
+
+    if (String(requester._id) !== targetId && requester.role !== "admin") {
+      res.status(403).json({
+        success: false,
+        message: "You cannot update another user's profile",
+      });
+      return;
+    }
+
+    const targetUser = (await AuthUser.findById(targetId).select(
+      "+password"
+    )) as IAuthUser | null;
+    if (!targetUser) {
+      res.status(404).json({ success: false, message: "Target user not found" });
+      return;
+    }
+
+    if (name !== undefined) {
+      const trimmedName = String(name).trim();
+      if (!trimmedName) {
+        res.status(400).json({ success: false, message: "Name is required" });
+        return;
+      }
+      targetUser.name = trimmedName;
+    }
+
+    if (businessName !== undefined && targetUser.role === "vendor") {
+      targetUser.businessName = String(businessName).trim();
+    }
+
+    if (image !== undefined) {
+      targetUser.image = image ? String(image).trim() : null;
+    }
+
+    if (password && String(password).trim() !== "") {
+      const pwError = validatePasswordRules(String(password));
+      if (pwError) {
+        res.status(400).json({ success: false, message: pwError });
+        return;
+      }
+      targetUser.password = hashPassword(String(password));
+    }
+
+    await targetUser.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Profile updated successfully",
+      user: serializeAuthUser(targetUser),
+    });
+  } catch (error) {
+    console.error("Update profile error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to update profile" });
   }
 });
 
