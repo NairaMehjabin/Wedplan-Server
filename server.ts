@@ -25,6 +25,8 @@ interface IAuthUser extends mongoose.Document {
   businessName?: string;
   subscriptionPlan: "free" | "premium";
   subscriptionExpiresAt?: Date | null;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 const AuthUserSchema = new mongoose.Schema<IAuthUser>(
@@ -156,7 +158,7 @@ function extractBearerToken(req: Request): string | null {
 function getDashboardPath(role: UserRole): string {
   switch (role) {
     case "admin":
-      return "/dashboard/admin";
+      return "/dashboard";
     case "vendor":
       return "/dashboard/vendor";
     case "customer":
@@ -190,6 +192,46 @@ function serializeAuthUser(user: IAuthUser) {
     subscriptionPlan: user.subscriptionPlan ?? "free",
     subscriptionExpiresAt: user.subscriptionExpiresAt ?? null,
   };
+}
+
+async function requireAdmin(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const token = extractBearerToken(req);
+  if (!token) {
+    res.status(401).json({ success: false, message: "Unauthorized" });
+    return;
+  }
+
+  const decoded = verifyJwt(token);
+  if (!decoded) {
+    res
+      .status(401)
+      .json({ success: false, message: "Invalid or expired token" });
+    return;
+  }
+
+  const requester = (await AuthUser.findById(
+    decoded.userId
+  )) as IAuthUser | null;
+  if (!requester) {
+    res.status(401).json({ success: false, message: "User not found" });
+    return;
+  }
+
+  if (requester.isBlocked) {
+    res.status(403).json({ success: false, message: "Account is blocked" });
+    return;
+  }
+
+  if (requester.role !== "admin") {
+    res.status(403).json({ success: false, message: "Admin access required" });
+    return;
+  }
+
+  next();
 }
 
 app.use(
@@ -514,6 +556,146 @@ app.put("/api/auth/update-profile", async (req: Request, res: Response) => {
 app.post("/api/auth/sign-out", (_req: Request, res: Response) => {
   res.status(200).json({ success: true, message: "Signed out" });
 });
+
+app.get(
+  "/api/admin/users",
+  requireAdmin,
+  async (_req: Request, res: Response) => {
+    try {
+      const users = await AuthUser.find({})
+        .select("-password")
+        .sort({ createdAt: -1 })
+        .lean();
+      res.status(200).json({
+        success: true,
+        users: users.map((u) => ({
+          id: String(u._id),
+          _id: String(u._id),
+          name: u.name,
+          email: u.email,
+          image: u.image ?? null,
+          role: u.role,
+          isBlocked: Boolean(u.isBlocked),
+          businessName: u.businessName ?? "",
+          subscriptionPlan: u.subscriptionPlan ?? "free",
+          createdAt: u.createdAt,
+        })),
+      });
+    } catch (error) {
+      console.error("Admin get users error:", error);
+      res.status(500).json({ success: false, message: "Failed to fetch users" });
+    }
+  }
+);
+
+app.patch(
+  "/api/admin/users/:id/block",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id || "");
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        res.status(400).json({ success: false, message: "Invalid user ID" });
+        return;
+      }
+
+      const { isBlocked } = req.body as { isBlocked?: boolean };
+      if (typeof isBlocked !== "boolean") {
+        res
+          .status(400)
+          .json({ success: false, message: "isBlocked boolean is required" });
+        return;
+      }
+
+      const updated = (await AuthUser.findByIdAndUpdate(
+        id,
+        { isBlocked },
+        { new: true }
+      ).select("-password")) as IAuthUser | null;
+
+      if (!updated) {
+        res.status(404).json({ success: false, message: "User not found" });
+        return;
+      }
+
+      res.status(200).json({
+        success: true,
+        message: isBlocked ? "User blocked" : "User unblocked",
+        user: serializeAuthUser(updated),
+      });
+    } catch (error) {
+      console.error("Admin block user error:", error);
+      res
+        .status(500)
+        .json({ success: false, message: "Failed to update user status" });
+    }
+  }
+);
+
+app.patch(
+  "/api/admin/services/:id/status",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id || "");
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        res.status(400).json({ success: false, message: "Invalid service ID" });
+        return;
+      }
+
+      const nextStatus = String(req.body?.status || "").toLowerCase();
+      if (!["pending", "approved", "rejected"].includes(nextStatus)) {
+        res
+          .status(400)
+          .json({ success: false, message: "Invalid status value" });
+        return;
+      }
+
+      const servicesCol = mongoose.connection.collection("services");
+      const result = await servicesCol.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(id) },
+        { $set: { status: nextStatus } },
+        { returnDocument: "after" }
+      );
+
+      if (!result) {
+        res.status(404).json({ success: false, message: "Service not found" });
+        return;
+      }
+
+      res.status(200).json({
+        success: true,
+        message: `Service status updated to ${nextStatus}`,
+        service: result,
+      });
+    } catch (error) {
+      console.error("Admin update service status error:", error);
+      res
+        .status(500)
+        .json({ success: false, message: "Failed to update service status" });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/transactions",
+  requireAdmin,
+  async (_req: Request, res: Response) => {
+    try {
+      const txCol = mongoose.connection.collection("transactions");
+      const transactions = await txCol
+        .find({})
+        .sort({ createdAt: -1 })
+        .toArray();
+      res.status(200).json({ success: true, transactions });
+    } catch (error) {
+      console.error("Admin get transactions error:", error);
+      res
+        .status(500)
+        .json({ success: false, message: "Failed to fetch transactions" });
+    }
+  }
+);
 
 app.use("/api/services", serviceRoutes);
 
