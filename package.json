@@ -5,6 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch server.ts",
+    "seed": "tsx seed.ts",
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -29,5 +30,13 @@
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NairaMehjabin/Wedplan-Server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NairaMehjabin/Wedplan-Server/issues"
+  },
+  "homepage": "https://github.com/NairaMehjabin/Wedplan-Server#readme"
 }
