@@ -1,11 +1,187 @@
 import "dotenv/config";
+import crypto from "node:crypto";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
+import mongoose from "mongoose";
 import { connectDB } from "./db";
 import serviceRoutes from "./routes/serviceRoutes";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const JWT_SECRET =
+  process.env.JWT_SECRET ||
+  process.env.BETTER_AUTH_SECRET ||
+  "wedplan-dev-jwt-secret";
+
+type UserRole = "customer" | "vendor" | "admin";
+
+interface IAuthUser extends mongoose.Document {
+  name: string;
+  email: string;
+  password: string;
+  image?: string | null;
+  role: UserRole;
+  isBlocked: boolean;
+  businessName?: string;
+  subscriptionPlan: "free" | "premium";
+  subscriptionExpiresAt?: Date | null;
+}
+
+const AuthUserSchema = new mongoose.Schema<IAuthUser>(
+  {
+    name: { type: String, required: true, trim: true },
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      lowercase: true,
+      trim: true,
+      index: true,
+    },
+    password: { type: String, required: true, select: false },
+    image: { type: String, default: null },
+    role: {
+      type: String,
+      enum: ["customer", "vendor", "admin"],
+      default: "customer",
+      index: true,
+    },
+    isBlocked: { type: Boolean, default: false, index: true },
+    businessName: { type: String, trim: true },
+    subscriptionPlan: {
+      type: String,
+      enum: ["free", "premium"],
+      default: "free",
+    },
+    subscriptionExpiresAt: { type: Date, default: null },
+  },
+  { timestamps: true }
+);
+
+const AuthUser =
+  mongoose.models.User || mongoose.model<IAuthUser>("User", AuthUserSchema);
+
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const derived = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${derived}`;
+}
+
+function verifyPassword(password: string, stored: string): boolean {
+  const parts = stored.split(":");
+  if (parts.length !== 2) return false;
+  const [salt, keyHex] = parts;
+  const keyBuf = Buffer.from(keyHex, "hex");
+  const derivedBuf = crypto.scryptSync(password, salt, 64);
+  if (keyBuf.length !== derivedBuf.length) return false;
+  return crypto.timingSafeEqual(keyBuf, derivedBuf);
+}
+
+function base64UrlEncode(input: string | Buffer): string {
+  return Buffer.from(input)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function base64UrlDecode(segment: string): string {
+  const normalized = segment.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = normalized.length % 4;
+  const padded = pad ? normalized + "=".repeat(4 - pad) : normalized;
+  return Buffer.from(padded, "base64").toString("utf8");
+}
+
+function signJwt(payload: {
+  userId: string;
+  email: string;
+  role: UserRole;
+}): string {
+  const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const exp = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7;
+  const body = base64UrlEncode(JSON.stringify({ ...payload, exp }));
+  const unsigned = `${header}.${body}`;
+  const sig = crypto
+    .createHmac("sha256", JWT_SECRET)
+    .update(unsigned)
+    .digest();
+  return `${unsigned}.${base64UrlEncode(sig)}`;
+}
+
+function verifyJwt(
+  token: string
+): { userId: string; email: string; role: UserRole } | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const [header, body, sig] = parts;
+    const unsigned = `${header}.${body}`;
+    const expectedSig = base64UrlEncode(
+      crypto.createHmac("sha256", JWT_SECRET).update(unsigned).digest()
+    );
+    const sigBuf = Buffer.from(sig);
+    const expBuf = Buffer.from(expectedSig);
+    if (sigBuf.length !== expBuf.length) return null;
+    if (!crypto.timingSafeEqual(sigBuf, expBuf)) return null;
+
+    const decoded = JSON.parse(base64UrlDecode(body)) as {
+      userId?: string;
+      email?: string;
+      role?: UserRole;
+      exp?: number;
+    };
+    if (!decoded.userId || !decoded.email || !decoded.role) return null;
+    if (typeof decoded.exp === "number" && decoded.exp < Math.floor(Date.now() / 1000)) {
+      return null;
+    }
+    return {
+      userId: decoded.userId,
+      email: decoded.email,
+      role: decoded.role,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getDashboardPath(role: UserRole): string {
+  switch (role) {
+    case "admin":
+      return "/dashboard/admin";
+    case "vendor":
+      return "/dashboard/vendor";
+    case "customer":
+    default:
+      return "/dashboard/customer";
+  }
+}
+
+function validatePasswordRules(password: string): string | null {
+  if (typeof password !== "string" || password.length < 6) {
+    return "Password must be at least 6 characters long";
+  }
+  if (!/[A-Z]/.test(password)) {
+    return "Password must include at least one uppercase letter";
+  }
+  if (!/[a-z]/.test(password)) {
+    return "Password must include at least one lowercase letter";
+  }
+  return null;
+}
+
+function serializeAuthUser(user: IAuthUser) {
+  return {
+    id: String(user._id),
+    name: user.name,
+    email: user.email,
+    image: user.image ?? null,
+    role: user.role,
+    isBlocked: user.isBlocked,
+    businessName: user.businessName ?? "",
+    subscriptionPlan: user.subscriptionPlan ?? "free",
+    subscriptionExpiresAt: user.subscriptionExpiresAt ?? null,
+  };
+}
 
 app.use(
   cors({
@@ -17,6 +193,186 @@ app.use(express.json({ limit: "10mb" }));
 
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ success: true, message: "WedPlan API is healthy" });
+});
+
+app.post("/api/auth/sign-up", async (req: Request, res: Response) => {
+  try {
+    const { name, email, password, image, role, businessName } = req.body;
+
+    if (!name || !email || !password) {
+      res.status(400).json({
+        success: false,
+        message: "Full name, email, and password are required",
+      });
+      return;
+    }
+
+    const pwError = validatePasswordRules(password);
+    if (pwError) {
+      res.status(400).json({ success: false, message: pwError });
+      return;
+    }
+
+    const requestedRole = String(role || "customer").trim().toLowerCase();
+    if (requestedRole !== "customer" && requestedRole !== "vendor") {
+      res.status(400).json({
+        success: false,
+        message: "Public registration only supports 'customer' or 'vendor'",
+      });
+      return;
+    }
+
+    const assignedRole: UserRole = requestedRole;
+    if (
+      assignedRole === "vendor" &&
+      (!businessName || !String(businessName).trim())
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "Business name is required for vendor accounts",
+      });
+      return;
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const existing = await AuthUser.findOne({ email: normalizedEmail }).lean();
+    if (existing) {
+      res.status(409).json({
+        success: false,
+        message: "An account with this email already exists",
+      });
+      return;
+    }
+
+    const created = (await AuthUser.create({
+      name: String(name).trim(),
+      email: normalizedEmail,
+      password: hashPassword(String(password)),
+      image: image ? String(image).trim() : null,
+      role: assignedRole,
+      isBlocked: false,
+      businessName:
+        assignedRole === "vendor" ? String(businessName).trim() : undefined,
+      subscriptionPlan: "free",
+      subscriptionExpiresAt: null,
+    })) as IAuthUser;
+
+    const token = signJwt({
+      userId: String(created._id),
+      email: created.email,
+      role: created.role,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Registration successful",
+      token,
+      user: serializeAuthUser(created),
+      redirectTo: getDashboardPath(created.role),
+    });
+  } catch (error) {
+    console.error("Sign-up error:", error);
+    res.status(500).json({ success: false, message: "Failed to register" });
+  }
+});
+
+app.post("/api/auth/sign-in", async (req: Request, res: Response) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      res.status(400).json({
+        success: false,
+        message: "Email and password are required",
+      });
+      return;
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const user = (await AuthUser.findOne({ email: normalizedEmail }).select(
+      "+password"
+    )) as IAuthUser | null;
+
+    if (!user || !user.password || !verifyPassword(String(password), user.password)) {
+      res.status(401).json({
+        success: false,
+        message: "Invalid email or password",
+      });
+      return;
+    }
+
+    if (user.isBlocked) {
+      res.status(403).json({
+        success: false,
+        message: "Your account is blocked",
+      });
+      return;
+    }
+
+    const token = signJwt({
+      userId: String(user._id),
+      email: user.email,
+      role: user.role,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Signed in successfully",
+      token,
+      user: serializeAuthUser(user),
+      redirectTo: getDashboardPath(user.role),
+    });
+  } catch (error) {
+    console.error("Sign-in error:", error);
+    res.status(500).json({ success: false, message: "Failed to sign in" });
+  }
+});
+
+app.get("/api/auth/me", async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const token =
+      authHeader && authHeader.startsWith("Bearer ")
+        ? authHeader.slice(7).trim()
+        : null;
+
+    if (!token) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const decoded = verifyJwt(token);
+    if (!decoded) {
+      res
+        .status(401)
+        .json({ success: false, message: "Invalid or expired token" });
+      return;
+    }
+
+    const user = (await AuthUser.findById(decoded.userId)) as IAuthUser | null;
+    if (!user) {
+      res.status(401).json({ success: false, message: "User not found" });
+      return;
+    }
+
+    if (user.isBlocked) {
+      res.status(403).json({ success: false, message: "User is blocked" });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      user: serializeAuthUser(user),
+      redirectTo: getDashboardPath(user.role),
+    });
+  } catch (error) {
+    console.error("Session check error:", error);
+    res.status(500).json({ success: false, message: "Failed to verify session" });
+  }
+});
+
+app.post("/api/auth/sign-out", (_req: Request, res: Response) => {
+  res.status(200).json({ success: true, message: "Signed out" });
 });
 
 app.use("/api/services", serviceRoutes);
