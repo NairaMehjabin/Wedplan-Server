@@ -5,6 +5,7 @@ import cors from "cors";
 import mongoose from "mongoose";
 import { connectDB } from "./db";
 import serviceRoutes from "./routes/serviceRoutes";
+import bookingRoutes from "./routes/bookingRoutes";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -698,6 +699,7 @@ app.get(
 );
 
 app.use("/api/services", serviceRoutes);
+app.use("/api/bookings", bookingRoutes);
 
 app.use((_req: Request, res: Response) => {
   res.status(404).json({ success: false, message: "Route not found" });
