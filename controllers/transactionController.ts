@@ -9,7 +9,7 @@ const stripeSecretKey = process.env.STRIPE_SECRET_KEY || "";
 const stripe = new Stripe(stripeSecretKey);
 
 const PREMIUM_PLAN_PRICE = Number(process.env.PREMIUM_PLAN_PRICE || 1999);
-const STRIPE_CURRENCY = (process.env.STRIPE_CURRENCY || "usd").toLowerCase();
+const STRIPE_CURRENCY = (process.env.STRIPE_CURRENCY || "bdt").toLowerCase();
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
 
 function serializeUserDoc(
