@@ -289,15 +289,13 @@ app.post(
   handleStripeWebhook
 );
 
-// Express v5 named wildcard syntax (*splat) before express.json()
-app.all("/api/auth/*splat", toNodeHandler(auth));
-
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ success: true, message: "WedPlan API is healthy" });
 });
 
+// Custom /api/auth/* routes registered BEFORE Better Auth *splat catch-all
 app.post("/api/auth/google-sync", async (req: Request, res: Response) => {
   try {
     const session = await auth.api.getSession({
@@ -678,6 +676,9 @@ app.post("/api/auth/sign-out", (_req: Request, res: Response) => {
   res.status(200).json({ success: true, message: "Signed out" });
 });
 
+// Express v5 named wildcard syntax (*splat) for Better Auth
+app.all("/api/auth/*splat", toNodeHandler(auth));
+
 app.get(
   "/api/admin/users",
   requireAdmin,
@@ -860,5 +861,3 @@ async function startServer(): Promise<void> {
 }
 
 startServer();
-
-// Why is deploy #2 missing from GitHub? 😭
