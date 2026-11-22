@@ -11,6 +11,10 @@ export interface ITransaction extends Document {
   amount: number;
   currency: string;
   status: TransactionStatus;
+  stripeSessionId?: string;
+  stripePaymentIntentId?: string;
+  stripeCustomerId?: string;
+  paidAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -38,7 +42,7 @@ const TransactionSchema = new Schema<ITransaction>(
     },
     currency: {
       type: String,
-      default: "BDT",
+      default: "USD",
       trim: true,
     },
     status: {
@@ -46,6 +50,10 @@ const TransactionSchema = new Schema<ITransaction>(
       enum: ["completed", "pending", "failed"],
       default: "completed",
     },
+    stripeSessionId: { type: String, index: true, sparse: true },
+    stripePaymentIntentId: { type: String },
+    stripeCustomerId: { type: String },
+    paidAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

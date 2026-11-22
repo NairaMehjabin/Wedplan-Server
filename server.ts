@@ -7,6 +7,7 @@ import { connectDB } from "./db";
 import serviceRoutes from "./routes/serviceRoutes";
 import bookingRoutes from "./routes/bookingRoutes";
 import subscriptionRoutes from "./routes/subscriptionRoutes";
+import { handleStripeWebhook } from "./controllers/transactionController";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -255,6 +256,14 @@ app.use(
     credentials: true,
   })
 );
+
+// Must come before app.use(express.json()) so Stripe webhook signature verification gets raw bytes
+app.post(
+  "/api/webhooks/stripe",
+  express.raw({ type: "application/json" }),
+  handleStripeWebhook
+);
+
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/health", (_req: Request, res: Response) => {
