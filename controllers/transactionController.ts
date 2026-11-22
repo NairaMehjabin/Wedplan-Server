@@ -3,6 +3,7 @@ import Stripe from "stripe";
 import mongoose from "mongoose";
 import { AuthRequest } from "./bookingController";
 import { Transaction } from "../models/transaction";
+import { User } from "../models/user";
 
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY || "";
 const stripe = new Stripe(stripeSecretKey);
@@ -11,7 +12,10 @@ const PREMIUM_PLAN_PRICE = Number(process.env.PREMIUM_PLAN_PRICE || 1999);
 const STRIPE_CURRENCY = (process.env.STRIPE_CURRENCY || "usd").toLowerCase();
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
 
-function serializeUserDoc(userDoc: Record<string, unknown>, fallbackExpiresAt?: Date) {
+function serializeUserDoc(
+  userDoc: Record<string, unknown>,
+  fallbackExpiresAt?: Date
+) {
   return {
     id: String(userDoc._id),
     name: String(userDoc.name || ""),
@@ -32,7 +36,10 @@ export async function finalizePaidCheckoutSession(
   fallbackVendorId?: string
 ) {
   const vendorIdStr = String(
-    session.metadata?.vendorId || fallbackVendorId || ""
+    session.metadata?.vendorId ||
+      session.client_reference_id ||
+      fallbackVendorId ||
+      ""
   ).trim();
 
   if (!vendorIdStr || !mongoose.Types.ObjectId.isValid(vendorIdStr)) {
@@ -40,8 +47,7 @@ export async function finalizePaidCheckoutSession(
   }
 
   const vendorObjectId = new mongoose.Types.ObjectId(vendorIdStr);
-  const usersCol = mongoose.connection.collection("users");
-  const vendorDoc = await usersCol.findOne({ _id: vendorObjectId });
+  const vendorDoc = await User.findById(vendorObjectId).lean();
   if (!vendorDoc) {
     return null;
   }
@@ -56,17 +62,14 @@ export async function finalizePaidCheckoutSession(
     session.currency || session.metadata?.currency || STRIPE_CURRENCY
   ).toUpperCase();
 
-  await usersCol.updateOne(
-    { _id: vendorObjectId },
-    {
-      $set: {
-        subscriptionPlan: "premium",
-        subscriptionExpiresAt: expiresAt,
-        stripeCustomerId: session.customer ? String(session.customer) : undefined,
-        updatedAt: new Date(),
-      },
-    }
-  );
+  await User.findByIdAndUpdate(vendorObjectId, {
+    $set: {
+      subscriptionPlan: "premium",
+      subscriptionExpiresAt: expiresAt,
+      stripeCustomerId: session.customer ? String(session.customer) : undefined,
+      updatedAt: new Date(),
+    },
+  });
 
   const tx = await Transaction.findOneAndUpdate(
     { stripeSessionId: session.id },
@@ -95,11 +98,16 @@ export async function finalizePaidCheckoutSession(
     { upsert: true, new: true }
   );
 
-  const updatedUserDoc = await usersCol.findOne({ _id: vendorObjectId });
+  const updatedUserDoc = await User.findById(vendorObjectId).lean();
 
   return {
     transaction: tx,
-    user: updatedUserDoc ? serializeUserDoc(updatedUserDoc, expiresAt) : undefined,
+    user: updatedUserDoc
+      ? serializeUserDoc(
+          updatedUserDoc as unknown as Record<string, unknown>,
+          expiresAt
+        )
+      : undefined,
   };
 }
 
@@ -116,11 +124,22 @@ export async function createSubscriptionCheckoutSession(
       return;
     }
 
-    const authUser = req.authUser!;
-    const usersCol = mongoose.connection.collection("users");
-    const vendorObjectId = new mongoose.Types.ObjectId(authUser.id);
-    const vendorDoc = await usersCol.findOne({ _id: vendorObjectId });
+    const authUser = req.authUser;
+    if (!authUser) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
 
+    if (authUser.role !== "vendor") {
+      res.status(403).json({
+        success: false,
+        message: "Only vendor accounts can purchase a vendor subscription plan",
+      });
+      return;
+    }
+
+    const vendorObjectId = new mongoose.Types.ObjectId(authUser.id);
+    const vendorDoc = await User.findById(vendorObjectId).lean();
     if (!vendorDoc) {
       res.status(404).json({ success: false, message: "Vendor not found" });
       return;
@@ -128,6 +147,7 @@ export async function createSubscriptionCheckoutSession(
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
+      client_reference_id: String(vendorObjectId),
       customer_email: String(vendorDoc.email || authUser.email),
       line_items: [
         {
@@ -149,8 +169,8 @@ export async function createSubscriptionCheckoutSession(
         amount: String(PREMIUM_PLAN_PRICE),
         currency: STRIPE_CURRENCY.toUpperCase(),
       },
-      success_url: `${CLIENT_URL}/dashboard/customer?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${CLIENT_URL}/dashboard/customer?subscription=cancelled`,
+      success_url: `${CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${CLIENT_URL}/payment/cancel`,
     });
 
     res.status(200).json({
@@ -185,9 +205,10 @@ export async function verifySubscriptionSession(
 
     const sessionId = String(req.query.session_id || "").trim();
     if (!sessionId) {
-      res
-        .status(400)
-        .json({ success: false, message: "session_id query param is required" });
+      res.status(400).json({
+        success: false,
+        message: "session_id query param is required",
+      });
       return;
     }
 
@@ -229,6 +250,45 @@ export async function verifySubscriptionSession(
   }
 }
 
+export async function getSubscriptionSessionStatus(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const authUser = req.authUser;
+    if (!authUser) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const sessionId = String(req.query.session_id || "").trim();
+    const userDoc = await User.findById(authUser.id).lean();
+    if (!userDoc) {
+      res.status(404).json({ success: false, message: "User not found" });
+      return;
+    }
+
+    const transaction = sessionId
+      ? await Transaction.findOne({
+          stripeSessionId: sessionId,
+          vendorId: new mongoose.Types.ObjectId(authUser.id),
+        }).lean()
+      : null;
+
+    res.status(200).json({
+      success: true,
+      user: serializeUserDoc(userDoc as unknown as Record<string, unknown>),
+      transaction,
+    });
+  } catch (error) {
+    console.error("Get session status error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to check subscription status",
+    });
+  }
+}
+
 export async function handleStripeWebhook(
   req: Request,
   res: Response
@@ -236,22 +296,28 @@ export async function handleStripeWebhook(
   const sig = req.headers["stripe-signature"];
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
+  if (!webhookSecret) {
+    console.error("STRIPE_WEBHOOK_SECRET is not configured");
+    res.status(500).send("Webhook secret not configured");
+    return;
+  }
+
+  if (typeof sig !== "string") {
+    res.status(400).send("Webhook Error: Missing stripe-signature header");
+    return;
+  }
+
   let event: Stripe.Event;
 
   try {
-    if (webhookSecret && typeof sig === "string") {
-      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-    } else {
-      const rawBody = Buffer.isBuffer(req.body)
-        ? req.body.toString("utf8")
-        : JSON.stringify(req.body);
-      event = JSON.parse(rawBody) as Stripe.Event;
-    }
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
   } catch (err) {
     console.error("Stripe webhook signature verification failed:", err);
     res
       .status(400)
-      .send(`Webhook Error: ${err instanceof Error ? err.message : "Invalid payload"}`);
+      .send(
+        `Webhook Error: ${err instanceof Error ? err.message : "Invalid payload"}`
+      );
     return;
   }
 
