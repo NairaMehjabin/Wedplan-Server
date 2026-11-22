@@ -3,6 +3,9 @@ import crypto from "node:crypto";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import mongoose from "mongoose";
+import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
+import { betterAuth } from "better-auth";
+import { mongodbAdapter } from "better-auth/adapters/mongodb";
 import { connectDB } from "./db";
 import serviceRoutes from "./routes/serviceRoutes";
 import bookingRoutes from "./routes/bookingRoutes";
@@ -15,6 +18,35 @@ const JWT_SECRET =
   process.env.JWT_SECRET ||
   process.env.BETTER_AUTH_SECRET ||
   "wedplan-dev-jwt-secret";
+
+const allowedOrigins = (
+  process.env.CLIENT_URL || "http://localhost:3000"
+)
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+const betterAuthClient = new mongoose.mongo.MongoClient(
+  process.env.MONGODB_URI as string
+);
+const betterAuthDb = betterAuthClient.db();
+
+export const auth = betterAuth({
+  baseURL: process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`,
+  secret: process.env.BETTER_AUTH_SECRET,
+  database: mongodbAdapter(betterAuthDb, { client: betterAuthClient }),
+  trustedOrigins: [
+    ...allowedOrigins,
+    process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`,
+  ],
+  socialProviders: {
+    google: {
+      clientId: process.env.GOOGLE_CLIENT_ID as string,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET as string,
+      prompt: "select_account",
+    },
+  },
+});
 
 type UserRole = "customer" | "vendor" | "admin";
 
@@ -237,13 +269,6 @@ export async function requireAdmin(
   next();
 }
 
-const allowedOrigins = (
-  process.env.CLIENT_URL || "http://localhost:3000"
-)
-  .split(",")
-  .map((o) => o.trim())
-  .filter(Boolean);
-
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -264,10 +289,82 @@ app.post(
   handleStripeWebhook
 );
 
+// Express v5 named wildcard syntax (*splat) before express.json()
+app.all("/api/auth/*splat", toNodeHandler(auth));
+
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ success: true, message: "WedPlan API is healthy" });
+});
+
+app.post("/api/auth/google-sync", async (req: Request, res: Response) => {
+  try {
+    const session = await auth.api.getSession({
+      headers: fromNodeHeaders(req.headers),
+    });
+
+    const email = session?.user?.email?.trim().toLowerCase();
+    if (!email) {
+      res
+        .status(401)
+        .json({ success: false, message: "No active Google session found" });
+      return;
+    }
+
+    const requestedRole = String(req.body?.role || "customer")
+      .trim()
+      .toLowerCase();
+    const safeRole: UserRole =
+      requestedRole === "vendor" ? "vendor" : "customer";
+
+    let user = (await AuthUser.findOne({ email })) as IAuthUser | null;
+
+    if (!user) {
+      const randomSecretPw = hashPassword(
+        crypto.randomBytes(24).toString("hex") + "Aa1!"
+      );
+      user = (await AuthUser.create({
+        name: session?.user?.name?.trim() || email.split("@")[0],
+        email,
+        password: randomSecretPw,
+        image: session?.user?.image ? String(session.user.image).trim() : null,
+        role: safeRole,
+        isBlocked: false,
+        subscriptionPlan: "free",
+        subscriptionExpiresAt: null,
+      })) as IAuthUser;
+    } else if (session?.user?.image && !user.image) {
+      user.image = String(session.user.image).trim();
+      await user.save();
+    }
+
+    if (user.isBlocked) {
+      res
+        .status(403)
+        .json({ success: false, message: "Your account is blocked" });
+      return;
+    }
+
+    const token = signJwt({
+      userId: String(user._id),
+      email: user.email,
+      role: user.role,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Google session synced",
+      token,
+      user: serializeAuthUser(user),
+      redirectTo: getDashboardPath(user.role),
+    });
+  } catch (error) {
+    console.error("Google sync error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to sync Google session" });
+  }
 });
 
 app.post("/api/auth/sign-up", async (req: Request, res: Response) => {
