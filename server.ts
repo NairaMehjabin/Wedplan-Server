@@ -19,26 +19,49 @@ const JWT_SECRET =
   process.env.BETTER_AUTH_SECRET ||
   "wedplan-dev-jwt-secret";
 
+function normalizeOrigin(url: string): string {
+  return url.trim().replace(/\/+$/, "");
+}
+
 const allowedOrigins = (
-  process.env.CLIENT_URL || "http://localhost:3000"
+  process.env.CLIENT_URL || "http://localhost:3000,https://wedplan-alpha.vercel.app"
 )
   .split(",")
-  .map((o) => o.trim())
+  .map((o) => normalizeOrigin(o))
   .filter(Boolean);
+
+const betterAuthUrl = normalizeOrigin(
+  process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`
+);
+
+const isHttps =
+  process.env.NODE_ENV === "production" || betterAuthUrl.startsWith("https://");
 
 const betterAuthClient = new mongoose.mongo.MongoClient(
   process.env.MONGODB_URI as string
 );
-const betterAuthDb = betterAuthClient.db();
+const betterAuthDb = betterAuthClient.db(
+  process.env.MONGODB_DB_NAME || "wedplan_db"
+);
 
 export const auth = betterAuth({
-  baseURL: process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`,
+  baseURL: betterAuthUrl,
   secret: process.env.BETTER_AUTH_SECRET,
   database: mongodbAdapter(betterAuthDb, { client: betterAuthClient }),
-  trustedOrigins: [
-    ...allowedOrigins,
-    process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`,
-  ],
+  trustedOrigins: [...allowedOrigins, betterAuthUrl],
+  advanced: {
+    ipAddress: {
+      ipAddressHeaders: ["x-forwarded-for", "x-real-ip"],
+    },
+    defaultCookieAttributes: isHttps
+      ? {
+          sameSite: "none",
+          secure: true,
+          httpOnly: true,
+          path: "/",
+        }
+      : undefined,
+  },
   socialProviders: {
     google: {
       clientId: process.env.GOOGLE_CLIENT_ID as string,
@@ -272,10 +295,14 @@ export async function requireAdmin(
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      if (allowedOrigins.includes(normalizeOrigin(origin))) {
         callback(null, true);
       } else {
-        callback(new Error("Not allowed by CORS"));
+        callback(null, false);
       }
     },
     credentials: true,
@@ -855,6 +882,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 
 async function startServer(): Promise<void> {
   await connectDB();
+  await betterAuthClient.connect();
   app.listen(PORT, () => {
     console.log(`WedPlan server running on http://localhost:${PORT}`);
   });

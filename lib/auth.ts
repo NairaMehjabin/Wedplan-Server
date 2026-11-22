@@ -2,21 +2,32 @@ import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "better-auth/adapters/mongodb";
 import { MongoClient } from "mongodb";
 
+function normalizeOrigin(url: string): string {
+  return url.trim().replace(/\/+$/, "");
+}
+
 const client = new MongoClient(process.env.MONGODB_URI as string);
 const db = client.db(process.env.MONGODB_DB_NAME || "wedplan_db");
 
+const clientOrigins = (
+  process.env.CLIENT_URL || "http://localhost:3000,https://wedplan-alpha.vercel.app"
+)
+  .split(",")
+  .map((o) => normalizeOrigin(o))
+  .filter(Boolean);
+
+const betterAuthUrl = normalizeOrigin(
+  process.env.BETTER_AUTH_URL || "http://localhost:5000"
+);
+
 const isHttps =
-  process.env.NODE_ENV === "production" ||
-  (process.env.BETTER_AUTH_URL || "").startsWith("https://");
+  process.env.NODE_ENV === "production" || betterAuthUrl.startsWith("https://");
 
 export const auth = betterAuth({
-  baseURL: process.env.BETTER_AUTH_URL || "http://localhost:5000",
+  baseURL: betterAuthUrl,
   secret: process.env.BETTER_AUTH_SECRET,
   database: mongodbAdapter(db, { client }),
-  trustedOrigins: [
-    process.env.CLIENT_URL || "http://localhost:3000",
-    process.env.BETTER_AUTH_URL || "http://localhost:5000",
-  ],
+  trustedOrigins: [...clientOrigins, betterAuthUrl],
   advanced: {
     ipAddress: {
       ipAddressHeaders: ["x-forwarded-for", "x-real-ip"],
