@@ -128,7 +128,6 @@ export async function createSubscriptionCheckoutSession(
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-      payment_method_types: ["card"],
       customer_email: String(vendorDoc.email || authUser.email),
       line_items: [
         {
@@ -150,8 +149,8 @@ export async function createSubscriptionCheckoutSession(
         amount: String(PREMIUM_PLAN_PRICE),
         currency: STRIPE_CURRENCY.toUpperCase(),
       },
-      success_url: `${CLIENT_URL}/dashboard/vendor?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${CLIENT_URL}/dashboard/vendor?subscription=cancelled`,
+      success_url: `${CLIENT_URL}/dashboard/customer?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${CLIENT_URL}/dashboard/customer?subscription=cancelled`,
     });
 
     res.status(200).json({
