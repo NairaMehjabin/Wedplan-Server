@@ -103,7 +103,8 @@ export async function getAllServices(req: Request, res: Response): Promise<void>
 
 export async function getServiceById(req: Request, res: Response): Promise<void> {
   try {
-    const { id } = req.params;
+    const rawId = req.params.id;
+    const id = String(Array.isArray(rawId) ? rawId[0] : rawId || "").trim();
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       res.status(400).json({
@@ -274,7 +275,8 @@ export async function createService(req: AuthRequest, res: Response): Promise<vo
 export async function updateService(req: AuthRequest, res: Response): Promise<void> {
   try {
     const authUser = req.authUser!;
-    const id = String(req.params.id || "");
+    const rawId = req.params.id;
+    const id = String(Array.isArray(rawId) ? rawId[0] : rawId || "").trim();
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       res.status(400).json({ success: false, message: "Invalid service ID" });
@@ -405,7 +407,8 @@ export async function updateService(req: AuthRequest, res: Response): Promise<vo
 export async function deleteService(req: AuthRequest, res: Response): Promise<void> {
   try {
     const authUser = req.authUser!;
-    const id = String(req.params.id || "");
+    const rawId = req.params.id;
+    const id = String(Array.isArray(rawId) ? rawId[0] : rawId || "").trim();
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       res.status(400).json({ success: false, message: "Invalid service ID" });
