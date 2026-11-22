@@ -6,6 +6,7 @@ import mongoose from "mongoose";
 import { connectDB } from "./db";
 import serviceRoutes from "./routes/serviceRoutes";
 import bookingRoutes from "./routes/bookingRoutes";
+import subscriptionRoutes from "./routes/subscriptionRoutes";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -195,7 +196,7 @@ function serializeAuthUser(user: IAuthUser) {
   };
 }
 
-async function requireAdmin(
+export async function requireAdmin(
   req: Request,
   res: Response,
   next: NextFunction
@@ -235,9 +236,22 @@ async function requireAdmin(
   next();
 }
 
+const allowedOrigins = (
+  process.env.CLIENT_URL || "http://localhost:3000"
+)
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
   })
 );
@@ -684,10 +698,31 @@ app.get(
   async (_req: Request, res: Response) => {
     try {
       const txCol = mongoose.connection.collection("transactions");
-      const transactions = await txCol
-        .find({})
-        .sort({ createdAt: -1 })
-        .toArray();
+      const rawTx = await txCol.find({}).sort({ createdAt: -1 }).toArray();
+      const usersCol = mongoose.connection.collection("users");
+
+      const vendorIds = [
+        ...new Set(rawTx.map((t) => String(t.vendorId || "")).filter(Boolean)),
+      ]
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const vendors = vendorIds.length
+        ? await usersCol.find({ _id: { $in: vendorIds } }).toArray()
+        : [];
+      const vendorMap = new Map(vendors.map((v) => [String(v._id), v]));
+
+      const transactions = rawTx.map((t) => {
+        const vendor = vendorMap.get(String(t.vendorId || ""));
+        return {
+          ...t,
+          _id: String(t._id),
+          vendorName: vendor?.name || t.vendorName || "Vendor",
+          vendorEmail: vendor?.email || t.vendorEmail || "",
+          businessName: vendor?.businessName || t.businessName || "",
+        };
+      });
+
       res.status(200).json({ success: true, transactions });
     } catch (error) {
       console.error("Admin get transactions error:", error);
@@ -700,6 +735,7 @@ app.get(
 
 app.use("/api/services", serviceRoutes);
 app.use("/api/bookings", bookingRoutes);
+app.use("/api/subscriptions", subscriptionRoutes);
 
 app.use((_req: Request, res: Response) => {
   res.status(404).json({ success: false, message: "Route not found" });

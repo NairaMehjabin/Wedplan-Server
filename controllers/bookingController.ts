@@ -1,4 +1,4 @@
-import { Request, Response } from "express";
+import { Request, Response, NextFunction } from "express";
 import mongoose from "mongoose";
 import crypto from "node:crypto";
 import { Booking, BookingStatus } from "../models/booking";
@@ -79,7 +79,7 @@ function verifyJwtToken(
 export async function requireAuth(
   req: AuthRequest,
   res: Response,
-  next: () => void
+  next: NextFunction
 ): Promise<void> {
   const authHeader = req.headers.authorization;
   const token =
@@ -127,7 +127,7 @@ export async function requireAuth(
 }
 
 export function requireRole(...allowedRoles: UserRole[]) {
-  return (req: AuthRequest, res: Response, next: () => void): void => {
+  return (req: AuthRequest, res: Response, next: NextFunction): void => {
     if (!req.authUser) {
       res.status(401).json({ success: false, message: "Unauthorized" });
       return;
@@ -157,7 +157,9 @@ export async function createBooking(
     };
 
     if (!serviceId || !mongoose.Types.ObjectId.isValid(String(serviceId))) {
-      res.status(400).json({ success: false, message: "Valid serviceId is required" });
+      res
+        .status(400)
+        .json({ success: false, message: "Valid serviceId is required" });
       return;
     }
 
@@ -191,7 +193,15 @@ export async function createBooking(
     }
 
     const serviceVendorId = service.vendorId ? String(service.vendorId) : "";
-    if (serviceVendorId && serviceVendorId === authUser.id) {
+    if (!serviceVendorId || !mongoose.Types.ObjectId.isValid(serviceVendorId)) {
+      res.status(400).json({
+        success: false,
+        message: "Service does not have a valid vendor assigned",
+      });
+      return;
+    }
+
+    if (serviceVendorId === authUser.id) {
       res.status(400).json({
         success: false,
         message: "You cannot book your own service",
@@ -201,10 +211,7 @@ export async function createBooking(
 
     const customerObjectId = new mongoose.Types.ObjectId(authUser.id);
     const serviceObjectId = new mongoose.Types.ObjectId(String(serviceId));
-    const vendorObjectId =
-      serviceVendorId && mongoose.Types.ObjectId.isValid(serviceVendorId)
-        ? new mongoose.Types.ObjectId(serviceVendorId)
-        : customerObjectId;
+    const vendorObjectId = new mongoose.Types.ObjectId(serviceVendorId);
 
     const duplicate = await Booking.findOne({
       serviceId: serviceObjectId,
@@ -290,9 +297,7 @@ export async function getMyBookings(
         : Promise.resolve([]),
     ]);
 
-    const serviceMap = new Map(
-      servicesDocs.map((s) => [String(s._id), s])
-    );
+    const serviceMap = new Map(servicesDocs.map((s) => [String(s._id), s]));
     const vendorMap = new Map(vendorsDocs.map((v) => [String(v._id), v]));
 
     const formatted = rawBookings.map((b) => {
@@ -309,9 +314,7 @@ export async function getMyBookings(
         price: typeof srv?.price === "number" ? srv.price : undefined,
         vendorId: String(b.vendorId),
         vendorName: String(vnd?.name || srv?.vendorName || "Vendor"),
-        businessName: String(
-          vnd?.businessName || srv?.businessName || ""
-        ),
+        businessName: String(vnd?.businessName || srv?.businessName || ""),
         eventDate: b.eventDate,
         eventLocation: b.eventLocation,
         message: b.message || "",
@@ -390,11 +393,58 @@ export async function getVendorBookings(
   try {
     const authUser = req.authUser!;
     const vendorObjectId = new mongoose.Types.ObjectId(authUser.id);
-    const list = await Booking.find({ vendorId: vendorObjectId })
+
+    const rawBookings = await Booking.find({ vendorId: vendorObjectId })
       .sort({ createdAt: -1 })
       .lean();
 
-    res.status(200).json({ success: true, data: list });
+    const serviceIds = [
+      ...new Set(rawBookings.map((b) => String(b.serviceId)).filter(Boolean)),
+    ]
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    const customerIds = [
+      ...new Set(rawBookings.map((b) => String(b.customerId)).filter(Boolean)),
+    ]
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    const servicesCol = mongoose.connection.collection("services");
+    const usersCol = mongoose.connection.collection("users");
+
+    const [servicesDocs, customersDocs] = await Promise.all([
+      serviceIds.length
+        ? servicesCol.find({ _id: { $in: serviceIds } }).toArray()
+        : Promise.resolve([]),
+      customerIds.length
+        ? usersCol.find({ _id: { $in: customerIds } }).toArray()
+        : Promise.resolve([]),
+    ]);
+
+    const serviceMap = new Map(servicesDocs.map((s) => [String(s._id), s]));
+    const customerMap = new Map(customersDocs.map((c) => [String(c._id), c]));
+
+    const formatted = rawBookings.map((b) => {
+      const srv = serviceMap.get(String(b.serviceId));
+      const cust = customerMap.get(String(b.customerId));
+
+      return {
+        _id: String(b._id),
+        serviceId: String(b.serviceId),
+        serviceName: String(srv?.serviceName || "Wedding Service"),
+        customerId: String(b.customerId),
+        customerName: String(cust?.name || "Customer"),
+        customerEmail: String(cust?.email || ""),
+        eventDate: b.eventDate,
+        eventLocation: b.eventLocation,
+        message: b.message || "",
+        status: b.status as BookingStatus,
+        createdAt: b.createdAt,
+      };
+    });
+
+    res.status(200).json({ success: true, data: formatted });
   } catch (error) {
     console.error("Get vendor bookings error:", error);
     res
